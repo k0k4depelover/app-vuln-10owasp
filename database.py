@@ -6,6 +6,8 @@ from fastapi import HTTPException
 from mysql.connector import pooling
 
 # Se define un connection pool para evitar abrir una coneccion en cada peticion
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", 3306)
 
 connection_pool = mysql.connector.pooling.MySQLConnectionPool(
     pool_name="multas_pool",

@@ -24,10 +24,16 @@ NO USAR EN PRODUCCIÓN. Código para ejercicio de pentesting/fix propio.
 
 Corre con:
     uvicorn main:app --reload
+
+CHANGELOG (fix de bug, NO de seguridad):
+    - pay_fine() guardaba en invoices.stripe_charge_id un UUID inventado
+      (ch_mock_...) generado antes de llamar a Stripe, en vez del ID real
+      que devuelve payment_intent.id. Se eliminó el UUID mock y ahora se
+      persiste payment_intent.id. Las 3 vulnerabilidades de arriba siguen
+      intactas a propósito.
 """
 
 import os
-import uuid
 from datetime import datetime
 from typing import Annotated
 
@@ -55,9 +61,7 @@ app = FastAPI(title="Multas API (VULNERABLE)")
 SECRET_KEY = ""  # <-- secreto vacío. Cualquiera puede firmar tokens "válidos".
 
 # =========================================================
-# "Base de datos" en memoria — PLACEHOLDER
-# Reemplaza estas funciones por queries reales a tu DB.
-# Ver README.md para el esquema de tablas sugerido.
+# "Base de datos" — queries reales (ver schema en SQL adjunto)
 # =========================================================
 
 
@@ -70,7 +74,7 @@ def get_user_by_username(username: str, db: db_dependency):
 
     query = "SELECT * FROM users WHERE username=%s"
     with db.cursor(dictionary=True) as cursor:
-        user_data = cursor.execute(query, (username,))
+        cursor.execute(query, (username,))
         user_data = cursor.fetchone()
     return user_data
 
@@ -87,7 +91,7 @@ def get_fine_by_id(fine_id: int, db: db_dependency):
         raise HTTPException(400, "El id no es valido")
     query = "SELECT * FROM fines WHERE id=%s"
     with db.cursor(dictionary=True) as cursor:
-        fine_data = cursor.execute(query, (fine_id,))
+        cursor.execute(query, (fine_id,))
         fine_data = cursor.fetchone()
     return fine_data
 
@@ -95,7 +99,7 @@ def get_fine_by_id(fine_id: int, db: db_dependency):
 def mark_fine_as_paid(fine_id, db: db_dependency):
     if fine_id <= 0:
         raise HTTPException(400, "El id no es valido")
-    update_query = "UPDATE fines SET paid=TRUE WHERE id= %s"
+    update_query = "UPDATE fines SET paid=TRUE WHERE id=%s"
     with db.cursor(dictionary=True) as cursor:
         cursor.execute(update_query, (fine_id,))
         db.commit()
@@ -113,12 +117,12 @@ def insert_invoice(
         raise HTTPException(status_code=400, detail="Valores invalidos para ingresar")
 
     invoice_insert = (
-        "INSERT INTO invoices(fine_id, user_id, amount, stripe_charge_id,stripe_status, created_at) "
+        "INSERT INTO invoices(fine_id, user_id, amount, stripe_charge_id, stripe_status, created_at) "
         "VALUES(%s, %s, %s, %s, %s, %s)"
     )
 
     with db.cursor(dictionary=True) as cursor:
-        invoice_insert = cursor.execute(
+        cursor.execute(
             invoice_insert,
             (
                 fine_id,
@@ -130,7 +134,7 @@ def insert_invoice(
             ),
         )
         db.commit()
-    return invoice_insert
+        return cursor.lastrowid
 
 
 # =========================================================
@@ -144,7 +148,7 @@ class LoginRequest(BaseModel):
 
 
 class PayRequest(BaseModel):
-    # 🔴 BOPLA: el cliente decide cuánto paga
+    # 🔴 BOPLA: el cliente decide cuánto paga (se deja a propósito)
     amount: float
     card_number: str = "4242424242424242"  # tarjeta de prueba mock-stripe
 
@@ -203,6 +207,8 @@ def get_fine(fine_id: int, db: db_dependency, authorization: str = Header(None))
 
 # =========================================================
 # 🔴 VULNERABILIDAD #3: BOPLA (mass assignment) + BOLA heredado
+# ✅ FIX DE BUG (no de seguridad): ahora se guarda el charge id REAL
+#    de Stripe (payment_intent.id) en vez de un UUID inventado.
 # =========================================================
 
 
@@ -215,12 +221,11 @@ def pay_fine(
     if not fine:
         raise HTTPException(status_code=404, detail="Multa no encontrada")
 
-    # 🔴 No valida ownership de la multa (BOLA)
+    # 🔴 No valida ownership de la multa (BOLA) -- se deja a propósito
     # 🔴 Cargo REAL a Stripe en modo test, pero sigue usando data.amount
     #    controlado por el cliente (BOPLA) -> puedes hacer que Stripe
     #    procese $0.01 por una multa de $300, y verlo en tu dashboard.
-
-    stripe_charge_id = f"ch_mock_{uuid.uuid4().hex[:16]}"
+    #    -- se deja a propósito, es la vulnerabilidad #3 del ejercicio.
 
     try:
         payment_intent = stripe.PaymentIntent.create(
@@ -237,14 +242,18 @@ def pay_fine(
             status_code=402,
             detail=f"Hubo un error en stripe: {e.user_message or str(e)} ",
         )
+
+    # ✅ Antes acá se guardaba un f"ch_mock_{uuid.uuid4().hex[:16]}" inventado.
+    #    Ahora se persiste el id real que devuelve Stripe.
     insert_invoice(
         fine_id,
         current_user["user_id"],
         data.amount,
-        stripe_charge_id,
+        payment_intent.id,  # <-- antes: stripe_charge_id (UUID mock)
         payment_intent.status,
         db,
     )
+
     return {
         "message": "Pago procesado",
         "stripe_id": payment_intent.id,
