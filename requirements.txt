@@ -67,11 +67,9 @@ networkx==3.6.1
 nodeenv==1.10.0
 noisereduce==3.0.3
 numba==0.62.1
-numpy==2.3.2
 onnxruntime==1.29.0
 opencv-python==4.13.0.92
 packaging==25.0
-pandas==3.0.0
 passlib==1.7.4
 pefile==2024.8.26
 pillow==12.3.0
@@ -83,8 +81,6 @@ pooch==1.8.2
 pre_commit==4.5.1
 propcache==0.4.1
 protobuf==7.36.0
-psycopg2==2.9.11
-psycopg2-binary==2.9.11
 pyarrow==21.0.0
 pyasn1==0.6.1
 pycares==5.0.1
@@ -154,3 +150,8 @@ websockets==16.0
 yarg==0.1.10
 yarl==1.23.0
 mysql-connector-python
+PyJWT
+PyJWT[crypto]
+uvicorn
+dotenv
+stripe

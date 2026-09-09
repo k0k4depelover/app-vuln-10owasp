@@ -26,19 +26,26 @@ Corre con:
     uvicorn main:app --reload
 """
 
+import os
 import uuid
 from datetime import datetime
 from typing import Annotated
 
 import jwt
-import pymysql
-from fastapi import Dependency, Depends, FastAPI, Header, HTTPException
-
-# Úsala como tipo:
-DbDependency = Annotated[MySQLConnectionAbstract, Depends(get_db)]
+import stripe
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from mysql.connector.pooling import PooledMySQLConnection
 from pydantic import BaseModel
 
 from database import get_db
+
+load_dotenv()
+
+# 🟡 Por ahora la secret key vive en .env (correcto). Más adelante, como
+# ejercicio, la vamos a "filtrar" a propósito para aprender a rotarla.
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
 app = FastAPI(title="Multas API (VULNERABLE)")
 
@@ -53,7 +60,8 @@ SECRET_KEY = ""  # <-- secreto vacío. Cualquiera puede firmar tokens "válidos"
 # Ver README.md para el esquema de tablas sugerido.
 # =========================================================
 
-db_dependency = Annotated[pymysql.connections.Connection, Depends(get_db)]
+
+db_dependency = Annotated[PooledMySQLConnection, Depends(get_db)]
 
 
 def get_user_by_username(username: str, db: db_dependency):
@@ -61,18 +69,68 @@ def get_user_by_username(username: str, db: db_dependency):
         raise HTTPException(400, "El nombre de usuario no es valido.")
 
     query = "SELECT * FROM users WHERE username=%s"
-    with db.cursor() as cursor:
-        user_data = cursor.execute(query, username)
+    with db.cursor(dictionary=True) as cursor:
+        user_data = cursor.execute(query, (username,))
+        user_data = cursor.fetchone()
     return user_data
+
+
+def get_invoice_by_id(invoice_id: int, db):
+    query = "SELECT * FROM invoices WHERE id=%s"
+    with db.cursor(dictionary=True) as cursor:
+        cursor.execute(query, (invoice_id,))
+        return cursor.fetchone()
 
 
 def get_fine_by_id(fine_id: int, db: db_dependency):
     if fine_id <= 0:
         raise HTTPException(400, "El id no es valido")
     query = "SELECT * FROM fines WHERE id=%s"
-    with db.cursor() as cursor:
-        fine_data = cursor.execute(query, fine_id)
+    with db.cursor(dictionary=True) as cursor:
+        fine_data = cursor.execute(query, (fine_id,))
+        fine_data = cursor.fetchone()
     return fine_data
+
+
+def mark_fine_as_paid(fine_id, db: db_dependency):
+    if fine_id <= 0:
+        raise HTTPException(400, "El id no es valido")
+    update_query = "UPDATE fines SET paid=TRUE WHERE id= %s"
+    with db.cursor(dictionary=True) as cursor:
+        cursor.execute(update_query, (fine_id,))
+        db.commit()
+
+
+def insert_invoice(
+    fine_id: int,
+    user_id: int,
+    amount: float,
+    stripe_charge_id: str,
+    stripe_status,
+    db: db_dependency,
+):
+    if user_id <= 0 or amount < 0 or fine_id < 0:
+        raise HTTPException(status_code=400, detail="Valores invalidos para ingresar")
+
+    invoice_insert = (
+        "INSERT INTO invoices(fine_id, user_id, amount, stripe_charge_id,stripe_status, created_at) "
+        "VALUES(%s, %s, %s, %s, %s, %s)"
+    )
+
+    with db.cursor(dictionary=True) as cursor:
+        invoice_insert = cursor.execute(
+            invoice_insert,
+            (
+                fine_id,
+                user_id,
+                amount,
+                stripe_charge_id,
+                stripe_status,
+                datetime.now(),
+            ),
+        )
+        db.commit()
+    return invoice_insert
 
 
 # =========================================================
@@ -112,9 +170,9 @@ def get_current_user(authorization: str = Header(None)):
 
 
 @app.post("/auth/login")
-def login(data: LoginRequest):
+def login(data: LoginRequest, db: db_dependency):
     # 🔴 Sin rate limiting: fuerza bruta sin restricción
-    user = get_user_by_username(data.username)
+    user = get_user_by_username(data.username, db)
     if not user or user["password"] != data.password:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
@@ -133,9 +191,9 @@ def login(data: LoginRequest):
 
 
 @app.get("/fines/{fine_id}")
-def get_fine(fine_id: int, authorization: str = Header(None)):
+def get_fine(fine_id: int, db: db_dependency, authorization: str = Header(None)):
     current_user = get_current_user(authorization)
-    fine = get_fine_by_id(fine_id)
+    fine = get_fine_by_id(fine_id, db)
     if not fine:
         raise HTTPException(status_code=404, detail="Multa no encontrada")
 
@@ -148,41 +206,95 @@ def get_fine(fine_id: int, authorization: str = Header(None)):
 # =========================================================
 
 
-@app.post("/fines/{fine_id}/pay")
-def pay_fine(fine_id: int, data: PayRequest, authorization: str = Header(None)):
+@app.post("/fines/{fine_id}/pay", status_code=200)
+def pay_fine(
+    fine_id: int, data: PayRequest, db: db_dependency, authorization: str = Header(None)
+):
     current_user = get_current_user(authorization)
-    fine = get_fine_by_id(fine_id)
+    fine = get_fine_by_id(fine_id, db)
     if not fine:
         raise HTTPException(status_code=404, detail="Multa no encontrada")
 
     # 🔴 No valida ownership de la multa (BOLA)
-    # 🔴 Mock de Stripe: "cobra" lo que el cliente diga, no lo real (BOPLA)
+    # 🔴 Cargo REAL a Stripe en modo test, pero sigue usando data.amount
+    #    controlado por el cliente (BOPLA) -> puedes hacer que Stripe
+    #    procese $0.01 por una multa de $300, y verlo en tu dashboard.
+
     stripe_charge_id = f"ch_mock_{uuid.uuid4().hex[:16]}"
 
-    invoice_id = len(MOCK_INVOICES) + 1
-    invoice = {
-        "id": invoice_id,
-        "fine_id": fine_id,
-        "user_id": current_user["user_id"],
-        "amount": data.amount,  # 🔴 monto controlado por el cliente
-        "stripe_charge_id": stripe_charge_id,
-        "created_at": datetime.utcnow().isoformat(),
+    try:
+        payment_intent = stripe.PaymentIntent.create(
+            amount=(round(data.amount * 100)),
+            currency="usd",
+            payment_method="pm_card_visa",
+            confirm=True,
+            automatic_payment_methods={"enabled": True, "allow_redirects": "never"},
+            description=f"Pago de multa #{fine_id}",
+            metadata={"fine_id": str(fine_id), "user_id": str(current_user["user_id"])},
+        )
+    except stripe.error.StripeError as e:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Hubo un error en stripe: {e.user_message or str(e)} ",
+        )
+    insert_invoice(
+        fine_id,
+        current_user["user_id"],
+        data.amount,
+        stripe_charge_id,
+        payment_intent.status,
+        db,
+    )
+    return {
+        "message": "Pago procesado",
+        "stripe_id": payment_intent.id,
+        "status": payment_intent.status,
     }
-    MOCK_INVOICES[invoice_id] = invoice
-    fine["paid"] = True  # 🔴 se marca pagada sin validar el monto real
-
-    return {"message": "Pago procesado", "invoice": invoice}
 
 
 @app.get("/invoices/{invoice_id}")
-def get_invoice(invoice_id: int, authorization: str = Header(None)):
+def get_invoice(invoice_id: int, db: db_dependency, authorization: str = Header(None)):
     current_user = get_current_user(authorization)
-    invoice = MOCK_INVOICES.get(invoice_id)
+    invoice = get_invoice_by_id(invoice_id, db)
     if not invoice:
         raise HTTPException(status_code=404, detail="Factura no encontrada")
 
     # 🔴 BOLA otra vez: no valida invoice["user_id"] == current_user["user_id"]
     return invoice
+
+
+@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    """
+    Stripe te llama a ESTE endpoint cuando pasa algo (pago confirmado,
+    fallido, disputa, etc). Prueba con:
+
+        stripe listen --forward-to localhost:8000/webhooks/stripe
+        stripe trigger payment_intent.succeeded
+
+    La verificación de firma es OBLIGATORIA: sin ella, cualquiera podría
+    hacer POST a esta URL fingiendo ser Stripe y marcar pagos como exitosos.
+    """
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except (ValueError, stripe.error.SignatureVerificationError):
+        raise HTTPException(status_code=400, detail="Firma de webhook inválida")
+
+    if event["type"] == "payment_intent.succeeded":
+        pi = event["data"]["object"]
+        print(
+            f"✅ Pago confirmado en Stripe: {pi['id']} — fine_id={pi['metadata'].get('fine_id')}"
+        )
+    elif event["type"] == "payment_intent.payment_failed":
+        pi = event["data"]["object"]
+        print(f"❌ Pago falló: {pi['id']}")
+
+    return {"received": True}
 
 
 @app.get("/")
