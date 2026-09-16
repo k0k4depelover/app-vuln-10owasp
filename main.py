@@ -86,16 +86,6 @@ def get_invoice_by_id(invoice_id: int, db):
         return cursor.fetchone()
 
 
-def get_fine_by_id(fine_id: int, db: db_dependency):
-    if fine_id <= 0:
-        raise HTTPException(400, "El id no es valido")
-    query = "SELECT * FROM fines WHERE id=%s"
-    with db.cursor(dictionary=True) as cursor:
-        cursor.execute(query, (fine_id,))
-        fine_data = cursor.fetchone()
-    return fine_data
-
-
 def mark_fine_as_paid(fine_id, db: db_dependency):
     if fine_id <= 0:
         raise HTTPException(400, "El id no es valido")
@@ -135,6 +125,44 @@ def insert_invoice(
         )
         db.commit()
         return cursor.lastrowid
+
+
+# VIEJO CODIGO INSEGURO:
+
+
+# def get_fine_by_id(fine_id: int, db: db_dependency):
+#     if fine_id <= 0:
+#         raise HTTPException(400, "El id no es valido")
+#     query = "SELECT * FROM fines WHERE id=%s"
+#     with db.cursor(dictionary=True) as cursor:
+#         cursor.execute(query, (fine_id,))
+#         fine_data = cursor.fetchone()
+#     return fine_data
+
+
+# NUEVO CODIGO SEGURO:
+
+
+def get_fine_by_id(fine_id: int, user_id: int, db: db_dependency):
+    if fine_id <= 0:
+        raise HTTPException(400, "El id no es valido")
+    fine_get = "SELECT * FROM fines WHERE id=%s AND user_id=%s"
+
+    with db.cursor(dictonary=True) as cursor:
+        cursor.execute(fine_get, (fine_id, user_id))
+        fine_data = cursor.fetchone()
+
+    if not fine_data:
+        raise HTTPException(
+            status_code=404, detail="No exite una multa asociada a este usuario"
+        )
+
+    return fine_data
+
+
+def get_fine_ammount(fine_id: int, user_id: int) -> float:
+    fine_data = get_fine_by_id(fine_id, user_id)
+    return fine_data.amount
 
 
 # =========================================================
@@ -214,18 +242,21 @@ def get_fine(fine_id: int, db: db_dependency, authorization: str = Header(None))
 
 @app.post("/fines/{fine_id}/pay", status_code=200)
 def pay_fine(
-    fine_id: int, data: PayRequest, db: db_dependency, authorization: str = Header(None)
+    fine_id: int,
+    user_id,
+    data: PayRequest,
+    db: db_dependency,
+    authorization: str = Header(None),
 ):
     current_user = get_current_user(authorization)
-    fine = get_fine_by_id(fine_id, db)
+    fine = get_fine_by_id(fine_id, user_id, db)
     if not fine:
         raise HTTPException(status_code=404, detail="Multa no encontrada")
 
-    # 🔴 No valida ownership de la multa (BOLA) -- se deja a propósito
-    # 🔴 Cargo REAL a Stripe en modo test, pero sigue usando data.amount
-    #    controlado por el cliente (BOPLA) -> puedes hacer que Stripe
-    #    procese $0.01 por una multa de $300, y verlo en tu dashboard.
-    #    -- se deja a propósito, es la vulnerabilidad #3 del ejercicio.
+    ammount_to_pay = get_fine_ammount(fine_id, user_id)
+
+    if ammount_to_pay != data.amount:
+        raise HTTPException(status_code=403, detail="La cantidad a pagar no es valida")
 
     try:
         payment_intent = stripe.PaymentIntent.create(
