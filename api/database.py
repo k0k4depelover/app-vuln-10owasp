@@ -24,6 +24,7 @@ def get_db():
     conn = None
     try:
         conn = connection_pool.get_connection()
+        conn.autocommit = True
         yield conn
     except mysql.connector.Error as err:
         if err.errno == errorcode.ER_ACCESS_DENIED_ERROR:
