@@ -111,7 +111,22 @@ def insert_invoice(
         "VALUES(%s, %s, %s, %s, %s, %s)"
     )
 
+    db.start_transaction(isolation_level="SERIALIZABLE")
     with db.cursor(dictionary=True) as cursor:
+
+        cursor.execute(
+            "SELECT * FROM fines WHERE id=%s FOR UPDATE",
+            (fine_id,),
+        )
+        fine = cursor.fetchone()
+        if not fine:
+            db.rollback()
+            raise HTTPException(status_code=404, detail="Multa no encontrada")
+
+        if fine["paid"]:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="La multa ya está pagada")
+
         cursor.execute(
             invoice_insert,
             (
@@ -124,7 +139,11 @@ def insert_invoice(
             ),
         )
         db.commit()
-        return cursor.lastrowid
+        return {
+            "message": "Pago procesado",
+            "stripe_id": stripe_charge_id,
+            "status": stripe_status,
+        }
 
 
 # VIEJO CODIGO INSEGURO:
