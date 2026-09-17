@@ -38,23 +38,21 @@ from typing import Annotated
 
 import jwt
 import stripe
-from auth import get_current_user
 from dotenv import load_dotenv
+
+load_dotenv()
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from models import LoginRequest, PayRequest
 from mysql.connector.pooling import PooledMySQLConnection
 
-from services import (
+from api.auth import get_current_user
+from api.database import get_db
+from api.models import LoginRequest, PayRequest
+from api.services import (
     get_fine_by_id,
     get_invoice_by_id,
     get_user_by_username,
     insert_invoice,
 )
-
-load_dotenv()
-
-
-from api.database import get_db
 
 db_dependency = Annotated[PooledMySQLConnection, Depends(get_db)]
 

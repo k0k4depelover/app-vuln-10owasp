@@ -3,11 +3,10 @@ FROM python:3.13-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir uv
-
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project
 
-COPY main.py database.py ./
 
 EXPOSE 8001
 
